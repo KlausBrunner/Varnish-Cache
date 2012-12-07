@@ -39,6 +39,7 @@
  *	%l		Client user ID as reported by identd (always "-")
  *	%u		User ID if using HTTP authentication, or "-"
  *	%t		Date and time of request
+ *	%D		time from beginning to completion of request 
  *	%r		Request line
  *	%s		Status code
  *	%b		Length of reply body, or "-"
@@ -101,6 +102,7 @@ static struct logline {
 	struct tm df_t;			/* %t, Date and time */
 	char *df_u;			/* %u, Remote user */
 	char *df_ttfb;			/* Time to first byte */
+	char *df_tt;			/* %D, time taken to serve request */
 	const char *df_hitmiss;		/* Whether this is a hit or miss */
 	const char *df_handling;	/* How the request was handled
 					   (hit/miss/pass/pipe) */
@@ -256,6 +258,7 @@ clean_logline(struct logline *lp)
 	freez(lp->df_s);
 	freez(lp->df_u);
 	freez(lp->df_ttfb);
+	freez(lp->df_tt);
 	VTAILQ_FOREACH_SAFE(h, &lp->req_headers, list, h2) {
 		VTAILQ_REMOVE(&lp->req_headers, h, list);
 		freez(h->key);
@@ -563,6 +566,16 @@ collect_client(struct logline *lp, enum VSL_tag_e tag, unsigned spec,
 			clean_logline(lp);
 			break;
 		}
+
+		double begint, endt;
+		if(sscanf(ptr, "%*u %lf %lf %*u.%*u %*s", &begint, &endt) == 2) {
+			char tt[64];
+			sprintf(tt, "%.9f", endt - begint);
+			if (lp->df_tt != NULL)
+				free(lp->df_tt);
+			lp->df_tt = strdup(tt);	
+		}
+
 		if (lp->df_ttfb != NULL)
 			free(lp->df_ttfb);
 		lp->df_ttfb = strdup(ttfb);
@@ -714,6 +727,10 @@ h_ncsa(void *priv, enum VSL_tag_e tag, unsigned fd,
 			strftime(tbuf, sizeof tbuf,
 			    "[%d/%b/%Y:%T %z]", &lp->df_t);
 			VSB_cat(os, tbuf);
+			break;
+
+		case 'D':
+			VSB_cat(os, lp->df_tt);
 			break;
 
 		case 'U':
