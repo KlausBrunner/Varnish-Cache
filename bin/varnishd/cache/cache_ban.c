@@ -33,7 +33,7 @@
  *
  *	req.url == "/foo"
  *	req.url ~ ".iso" && obj.size > 10MB
- *	req.http.host ~ "web1.com" && obj.set-cookie ~ "USER=29293"
+ *	req.http.host ~ "web1.com" && obj.http.set-cookie ~ "USER=29293"
  *
  * We make the "&&" mandatory from the start, leaving the syntax space
  * for latter handling of "||" as well.
@@ -818,25 +818,30 @@ BAN_CheckObject(struct object *o, struct req *req)
 	return (ban_check_object(o, req->vsl, req->http) > 0);
 }
 
-static struct ban *
-ban_CheckLast(void)
+static void
+ban_cleantail(void)
 {
 	struct ban *b;
 
-	Lck_AssertHeld(&ban_mtx);
-	b = VTAILQ_LAST(&ban_head, banhead_s);
-	if (b != VTAILQ_FIRST(&ban_head) && b->refcount == 0) {
-		if (b->flags & BAN_F_GONE)
-			VSC_C_main->bans_gone--;
-		if (b->flags & BAN_F_REQ)
-			VSC_C_main->bans_req--;
-		VSC_C_main->bans--;
-		VSC_C_main->bans_deleted++;
-		VTAILQ_REMOVE(&ban_head, b, list);
-	} else {
-		b = NULL;
-	}
-	return (b);
+	do {
+		Lck_Lock(&ban_mtx);
+		b = VTAILQ_LAST(&ban_head, banhead_s);
+		if (b != VTAILQ_FIRST(&ban_head) && b->refcount == 0) {
+			if (b->flags & BAN_F_GONE)
+				VSC_C_main->bans_gone--;
+			if (b->flags & BAN_F_REQ)
+				VSC_C_main->bans_req--;
+			VSC_C_main->bans--;
+			VSC_C_main->bans_deleted++;
+			VTAILQ_REMOVE(&ban_head, b, list);
+			STV_BanInfo(BI_DROP, b->spec, ban_len(b->spec));
+		} else {
+			b = NULL;
+		}
+		Lck_Unlock(&ban_mtx);
+		if (b != NULL)
+			BAN_Free(b);
+	} while (b != NULL);
 }
 
 /*--------------------------------------------------------------------
@@ -983,41 +988,29 @@ ban_lurker_work(struct worker *wrk, struct vsl_log *vsl)
 static void * __match_proto__(bgthread_t)
 ban_lurker(struct worker *wrk, void *priv)
 {
-	struct ban *bf;
 	struct vsl_log vsl;
+	volatile double d;
+	int i = 0, n = 0;
 
-	int i = 0;
 	VSL_Setup(&vsl, NULL, 0);
 
 	(void)priv;
 	while (1) {
-
-		do {
-			/*
-			 * Ban-lurker is disabled:
-			 * Clean the last ban, if possible, and sleep
-			 */
-			Lck_Lock(&ban_mtx);
-			bf = ban_CheckLast();
-			if (bf != NULL)
-				/* Notify stevedores */
-				STV_BanInfo(BI_DROP, bf->spec,
-					    ban_len(bf->spec));
-			Lck_Unlock(&ban_mtx);
-			if (bf != NULL)
-				BAN_Free(bf);
-		} while (bf != NULL);
-
-		if (cache_param->ban_lurker_sleep != 0.0) {
-			do {
-				i = ban_lurker_work(wrk, &vsl);
-				VSL_Flush(&vsl, 0);
-				WRK_SumStat(wrk);
-				if (i)
-					VTIM_sleep(
-					    cache_param->ban_lurker_sleep);
-			} while (i);
+		d = cache_param->ban_lurker_sleep;
+		if (d > 0.0) {
+			i = ban_lurker_work(wrk, &vsl);
+			VSL_Flush(&vsl, 0);
+			WRK_SumStat(wrk);
+			if (i) {
+				VTIM_sleep(d);
+				if (++n > 10) {
+					ban_cleantail();
+					n = 0;
+				}
+				continue;
+			}
 		}
+		ban_cleantail();
 		VTIM_sleep(0.609);	// Random, non-magic
 	}
 	NEEDLESS_RETURN(NULL);
@@ -1063,21 +1056,6 @@ ccf_ban(struct cli *cli, const char * const *av, void *priv)
 			return;
 		}
 	BAN_Insert(b);
-}
-
-static void
-ccf_ban_url(struct cli *cli, const char * const *av, void *priv)
-{
-	const char *aav[6];
-
-	(void)priv;
-	aav[0] = NULL;
-	aav[1] = "ban";
-	aav[2] = "req.url";
-	aav[3] = "~";
-	aav[4] = av[2];
-	aav[5] = NULL;
-	ccf_ban(cli, aav, priv);
 }
 
 static void
@@ -1152,7 +1130,6 @@ ccf_ban_list(struct cli *cli, const char * const *av, void *priv)
 }
 
 static struct cli_proto ban_cmds[] = {
-	{ CLI_BAN_URL,				"", ccf_ban_url },
 	{ CLI_BAN,				"", ccf_ban },
 	{ CLI_BAN_LIST,				"", ccf_ban_list },
 	{ NULL }
