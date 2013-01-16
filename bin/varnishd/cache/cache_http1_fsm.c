@@ -76,6 +76,7 @@
 #include "cache.h"
 
 #include "vcl.h"
+#include "vct.h"
 #include "vtcp.h"
 #include "vtim.h"
 
@@ -200,7 +201,8 @@ http1_cleanup(struct sess *sp, struct worker *wrk, struct req *req)
 	req->t_req = NAN;
 	req->t_resp = NAN;
 
-	req->req_bodybytes = 0;
+	// req->req_bodybytes = 0;
+	req->resp_bodybytes = 0;
 
 	req->hash_always_miss = 0;
 	req->hash_ignore_busy = 0;
@@ -257,16 +259,15 @@ http1_dissect(struct worker *wrk, struct req *req)
 	req->vcl = wrk->vcl;
 	wrk->vcl = NULL;
 
-	HTTP_Setup(req->http, req->ws, req->vsl, HTTP_Req);
+	HTTP_Setup(req->http, req->ws, req->vsl, HTTP_Method);
 	req->err_code = http_DissectRequest(req);
 
 	/* If we could not even parse the request, just close */
 	if (req->err_code == 400) {
+		wrk->stats.client_req_400++;
 		SES_Close(req->sp, SC_RX_JUNK);
 		return (1);
 	}
-
-	wrk->stats.client_req++;
 	req->acct_req.req++;
 
 	req->ws_req = WS_Snapshot(req->ws);
@@ -275,15 +276,20 @@ http1_dissect(struct worker *wrk, struct req *req)
 	/* XXX: Expect headers are a mess */
 	if (req->err_code == 0 && http_GetHdr(req->http, H_Expect, &p)) {
 		if (strcasecmp(p, "100-continue")) {
+			wrk->stats.client_req_417++;
 			req->err_code = 417;
 		} else if (strlen(r) != write(req->sp->fd, r, strlen(r))) {
 			SES_Close(req->sp, SC_REM_CLOSE);
 			return (1);
 		}
-	}
+	} else if (req->err_code == 413)
+		wrk->stats.client_req_413++;
+	else
+		wrk->stats.client_req++;
+
 	http_Unset(req->http, H_Expect);
 	/* XXX: pull in req-body and make it available instead. */
-	req->reqbodydone = 0;
+	req->req_body_status = REQ_BODY_INIT;
 
 	HTTP_Copy(req->http0, req->http);	// For ESI & restart
 
@@ -367,4 +373,77 @@ HTTP1_Session(struct worker *wrk, struct req *req)
 			req->req_step = R_STP_RECV;
 		}
 	}
+}
+
+/*
+ * XXX: DiscardReqBody() is a dedicated function, because we might
+ * XXX: be able to disuade or terminate its transmission in some protocols.
+ */ 
+
+int
+HTTP1_DiscardReqBody(struct req *req)
+{
+	char buf[8192];
+	ssize_t l;
+
+	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
+	while (req->req_body_status != REQ_BODY_DONE &&
+	    req->req_body_status != REQ_BODY_NONE) {
+		l = HTTP1_GetReqBody(req, buf, sizeof buf);
+		if (l < 0)
+			return (-1);
+	}
+	return (0);
+}
+
+ssize_t
+HTTP1_GetReqBody(struct req *req, void *buf, ssize_t len)
+{
+	char *ptr, *endp;
+
+	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
+
+	if (req->req_body_status == REQ_BODY_INIT) {
+		if (http_GetHdr(req->http, H_Content_Length, &ptr)) {
+			AN(ptr);
+			if (*ptr == '\0') {
+				req->req_body_status = REQ_BODY_DONE;
+				return (-1);
+			}
+			req->req_bodybytes = strtoul(ptr, &endp, 10);
+			if (*endp != '\0' && !vct_islws(*endp)) {
+				req->req_body_status = REQ_BODY_DONE;
+				return (-1);
+			}
+			if (req->req_bodybytes == 0) {
+				req->req_body_status = REQ_BODY_DONE;
+				return (0);
+			}
+			req->req_body_status = REQ_BODY_CL;
+		} else if (http_GetHdr(req->http, H_Transfer_Encoding, NULL)) {
+			VSLb(req->vsl, SLT_Debug,
+			    "Transfer-Encoding in request");
+			req->req_body_status = REQ_BODY_DONE;
+			return (-1);
+		} else {
+			req->req_body_status = REQ_BODY_NONE;
+			return (0);
+		}
+	}
+	if (req->req_body_status == REQ_BODY_CL) {
+		if (req->req_bodybytes == 0) {
+			req->req_body_status = REQ_BODY_DONE;
+			return (0);
+		}
+		if (len > req->req_bodybytes)
+			len = req->req_bodybytes;
+		len = HTC_Read(req->htc, buf, len);
+		if (len <= 0) {
+			req->req_body_status = REQ_BODY_DONE;
+			return (-1);
+		}
+		req->req_bodybytes -= len;
+		return (len);
+	}
+	return (0);
 }

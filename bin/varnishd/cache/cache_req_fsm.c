@@ -215,7 +215,7 @@ cnt_deliver(struct worker *wrk, struct req *req)
 		assert(bo->state >= BOS_FAILED);
 
 		if (bo->state == BOS_FAILED) {
-			HSH_Deref(&wrk->stats, NULL, &req->obj);
+			(void)HSH_Deref(&wrk->stats, NULL, &req->obj);
 			VBO_DerefBusyObj(wrk, &req->busyobj);
 			req->err_code = 503;
 			req->req_step = R_STP_ERROR;
@@ -679,7 +679,7 @@ cnt_fetchbody(struct worker *wrk, struct req *req)
 		VBO_DerefBusyObj(wrk, &req->busyobj);
 	} else if (bo->state == BOS_FAILED) {
 		/* handle early failures */
-		HSH_Deref(&wrk->stats, NULL, &req->obj);
+		(void)HSH_Deref(&wrk->stats, NULL, &req->obj);
 		VBO_DerefBusyObj(wrk, &req->busyobj);
 		req->err_code = 503;
 		req->req_step = R_STP_ERROR;
@@ -727,7 +727,7 @@ cnt_hit(struct worker *wrk, struct req *req)
 	if (req->handling == VCL_RET_DELIVER) {
 		//AZ(req->busyobj->bereq->ws);
 		//AZ(req->busyobj->beresp->ws);
-		(void)FetchReqBody(req, 0);
+		(void)HTTP1_DiscardReqBody(req);	// XXX: handle err
 		req->req_step = R_STP_PREPRESP;
 		return (0);
 	}
@@ -1132,7 +1132,7 @@ cnt_recv(const struct worker *wrk, struct req *req)
 	SHA256_Final(req->digest, req->sha256ctx);
 	req->sha256ctx = NULL;
 
-	if (!strcmp(req->http->hd[HTTP_HDR_REQ].b, "HEAD"))
+	if (!strcmp(req->http->hd[HTTP_HDR_METHOD].b, "HEAD"))
 		req->wantbody = 0;
 	else
 		req->wantbody = 1;
@@ -1233,7 +1233,7 @@ CNT_Request(struct worker *wrk, struct req *req)
 		/* XXX: Workaround for pipe */
 		if (req->sp->fd >= 0) {
 			VSLb(req->vsl, SLT_Length, "%ju",
-			    (uintmax_t)req->req_bodybytes);
+			    (uintmax_t)req->resp_bodybytes);
 		}
 		VSLb(req->vsl, SLT_ReqEnd, "%.9f %.9f %.9f %.9f %.9f",
 		    req->t_req,

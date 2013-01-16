@@ -99,12 +99,14 @@ struct ban_test {
 	const void		*arg2_spec;
 };
 
+static void ban_info(enum baninfo event, const uint8_t *ban, unsigned len);
 static VTAILQ_HEAD(banhead_s,ban) ban_head = VTAILQ_HEAD_INITIALIZER(ban_head);
 static struct lock ban_mtx;
 static struct ban *ban_magic;
 static pthread_t ban_thread;
 static struct ban * volatile ban_start;
 static bgthread_t ban_lurker;
+static int ban_shutdown = 0;
 
 /*--------------------------------------------------------------------
  * BAN string defines & magic markers
@@ -417,9 +419,14 @@ BAN_AddTest(struct cli *cli, struct ban *b, const char *a1, const char *a2,
  * as a separate variable from the VTAILQ, to avoid depending on the
  * internals of the VTAILQ macros.  We tacitly assume that a pointer
  * write is always atomic in doing so.
+ *
+ * Returns:
+ *   0: Ban successfully inserted
+ *  -1: Ban not inserted due to shutdown in progress. The ban has been
+ *      deleted.
  */
 
-void
+int
 BAN_Insert(struct ban *b)
 {
 	struct ban  *bi, *be;
@@ -427,6 +434,11 @@ BAN_Insert(struct ban *b)
 	double t0;
 
 	CHECK_OBJ_NOTNULL(b, BAN_MAGIC);
+
+	if (ban_shutdown) {
+		BAN_Free(b);
+		return (-1);
+	}
 
 	AZ(VSB_finish(b->vsb));
 	ln = VSB_len(b->vsb);
@@ -446,6 +458,12 @@ BAN_Insert(struct ban *b)
 	b->vsb = NULL;
 
 	Lck_Lock(&ban_mtx);
+	if (ban_shutdown) {
+		/* Check again, we might have raced */
+		Lck_Unlock(&ban_mtx);
+		BAN_Free(b);
+		return (-1);
+	}
 	VTAILQ_INSERT_HEAD(&ban_head, b, list);
 	ban_start = b;
 	VSC_C_main->bans++;
@@ -459,16 +477,24 @@ BAN_Insert(struct ban *b)
 	else
 		be = NULL;
 
-	STV_BanInfo(BI_NEW, b->spec, ln);	/* Notify stevedores */
+	/* ban_magic is magic, and needs to be inserted early to give
+	 * a handle to grab a ref on. We don't report it here as the
+	 * stevedores will not be opened and ready to accept it
+	 * yet. Instead it is reported on BAN_Compile, which is after
+	 * the stevedores has been opened, but before any new objects
+	 * can have entered the cache (thus no objects in the mean
+	 * time depending on ban_magic in the list) */
+	if (b != ban_magic)
+		ban_info(BI_NEW, b->spec, ln); /* Notify stevedores */
 	Lck_Unlock(&ban_mtx);
 
 	if (be == NULL)
-		return;
+		return (0);
 
 	/* Hunt down duplicates, and mark them as gone */
 	bi = b;
 	Lck_Lock(&ban_mtx);
-	while(bi != be) {
+	while(!ban_shutdown && bi != be) {
 		bi = VTAILQ_NEXT(bi, list);
 		if (bi->flags & BAN_F_GONE)
 			continue;
@@ -479,6 +505,8 @@ BAN_Insert(struct ban *b)
 	}
 	be->refcount--;
 	Lck_Unlock(&ban_mtx);
+
+	return (0);
 }
 
 /*--------------------------------------------------------------------
@@ -547,6 +575,44 @@ BAN_RefBan(struct objcore *oc, double t0, const struct ban *tail)
 }
 
 /*--------------------------------------------------------------------
+ * Compile a full ban list and export this area to the stevedores for
+ * persistence.
+ */
+
+static void
+ban_export(void)
+{
+	struct ban *b;
+	struct vsb vsb;
+
+	Lck_AssertHeld(&ban_mtx);
+	/* XXX: Use the ban entry size measurements to hit the target
+	 * and avoid multiple allocations */
+	AN(VSB_new(&vsb, NULL, 64 * VSC_C_main->bans, VSB_AUTOEXTEND));
+	VTAILQ_FOREACH_REVERSE(b, &ban_head, banhead_s, list) {
+		AZ(VSB_bcat(&vsb, b->spec, ban_len(b->spec)));
+	}
+	AZ(VSB_finish(&vsb));
+	STV_BanExport((const uint8_t *)VSB_data(&vsb), VSB_len(&vsb));
+	VSB_delete(&vsb);
+}
+
+static void
+ban_info(enum baninfo event, const uint8_t *ban, unsigned len)
+{
+	if (STV_BanInfo(event, ban, len)) {
+		/* One or more stevedores reported failure. Export the
+		 * list instead. The exported list should take up less
+		 * space due to drops being purged and gones being
+		 * truncated. */
+		/* XXX: Keep some measure of how much space can be
+		 * saved, and only export if it's worth it. Assert if
+		 * not */
+		ban_export();
+	}
+}
+
+/*--------------------------------------------------------------------
  * Put a skeleton ban in the list, unless there is an identical,
  * time & condition, ban already in place.
  *
@@ -554,28 +620,25 @@ BAN_RefBan(struct objcore *oc, double t0, const struct ban *tail)
  * mark any older bans, with the same condition, GONE as well.
  */
 
-void
-BAN_Reload(const uint8_t *ban, unsigned len)
+static void
+ban_reload(const uint8_t *ban, unsigned len)
 {
 	struct ban *b, *b2;
 	int gone = 0;
 	double t0, t1, t2 = 9e99;
 
 	ASSERT_CLI();
+	Lck_AssertHeld(&ban_mtx);
 
 	t0 = ban_time(ban);
 	assert(len == ban_len(ban));
-
-	Lck_Lock(&ban_mtx);
 
 	VTAILQ_FOREACH(b, &ban_head, list) {
 		t1 = ban_time(b->spec);
 		assert(t1 < t2);
 		t2 = t1;
-		if (t1 == t0) {
-			Lck_Unlock(&ban_mtx);
+		if (t1 == t0)
 			return;
-		}
 		if (t1 < t0)
 			break;
 		if (ban_equal(b->spec, ban)) {
@@ -612,6 +675,30 @@ BAN_Reload(const uint8_t *ban, unsigned len)
 			VSC_C_main->bans_dups++;
 		}
 	}
+}
+
+/*--------------------------------------------------------------------
+ * Reload a series of persisted ban specs
+ */
+
+void
+BAN_Reload(const uint8_t *ptr, unsigned len)
+{
+	const uint8_t *pe;
+	unsigned l;
+
+	AZ(ban_shutdown);
+	pe = ptr + len;
+	Lck_Lock(&ban_mtx);
+	while (ptr < pe) {
+		/* XXX: This can be optimized by traversing the live
+		 * ban list together with the reload list (combining
+		 * the loops in BAN_Reload and ban_reload). */
+		l = ban_len(ptr);
+		assert(ptr + l <= pe);
+		ban_reload(ptr, l);
+		ptr += l;
+	}
 	Lck_Unlock(&ban_mtx);
 }
 
@@ -639,9 +726,18 @@ BAN_Compile(void)
 {
 
 	ASSERT_CLI();
+	AZ(ban_shutdown);
 
-	/* Notify stevedores */
-	STV_BanInfo(BI_NEW, ban_magic->spec, ban_len(ban_magic->spec));
+	Lck_Lock(&ban_mtx);
+
+	/* Do late reporting of ban_magic */
+	AZ(STV_BanInfo(BI_NEW, ban_magic->spec, ban_len(ban_magic->spec)));
+
+	/* All bans have been read from all persistent stevedores. Export
+	   the compiled list */
+	ban_export();
+
+	Lck_Unlock(&ban_mtx);
 
 	ban_start = VTAILQ_FIRST(&ban_head);
 	WRK_BgThread(&ban_thread, "ban-lurker", ban_lurker, NULL);
@@ -834,7 +930,7 @@ ban_cleantail(void)
 			VSC_C_main->bans--;
 			VSC_C_main->bans_deleted++;
 			VTAILQ_REMOVE(&ban_head, b, list);
-			STV_BanInfo(BI_DROP, b->spec, ban_len(b->spec));
+			ban_info(BI_DROP, b->spec, ban_len(b->spec));
 		} else {
 			b = NULL;
 		}
@@ -891,6 +987,8 @@ ban_lurker_work(struct worker *wrk, struct vsl_log *vsl)
 			    ban_time(b->spec), b->refcount);
 		while (1) {
 			Lck_Lock(&ban_mtx);
+			if (ban_shutdown)
+				break;
 			oc = VTAILQ_FIRST(&b->objcore);
 			if (oc == NULL)
 				break;
@@ -974,6 +1072,8 @@ ban_lurker_work(struct worker *wrk, struct vsl_log *vsl)
 				    ban_time(b->spec));
 		}
 		Lck_Unlock(&ban_mtx);
+		if (ban_shutdown)
+			break;
 		VTIM_sleep(cache_param->ban_lurker_sleep);
 		if (b == b0)
 			break;
@@ -995,13 +1095,13 @@ ban_lurker(struct worker *wrk, void *priv)
 	VSL_Setup(&vsl, NULL, 0);
 
 	(void)priv;
-	while (1) {
+	while (!ban_shutdown) {
 		d = cache_param->ban_lurker_sleep;
 		if (d > 0.0) {
 			i = ban_lurker_work(wrk, &vsl);
 			VSL_Flush(&vsl, 0);
 			WRK_SumStat(wrk);
-			if (i) {
+			if (i && !ban_shutdown) {
 				VTIM_sleep(d);
 				if (++n > 10) {
 					ban_cleantail();
@@ -1011,8 +1111,13 @@ ban_lurker(struct worker *wrk, void *priv)
 			}
 		}
 		ban_cleantail();
+		if (ban_shutdown)
+			break;
 		VTIM_sleep(0.609);	// Random, non-magic
 	}
+
+	pthread_exit(0);
+
 	NEEDLESS_RETURN(NULL);
 }
 
@@ -1055,7 +1160,11 @@ ccf_ban(struct cli *cli, const char * const *av, void *priv)
 			BAN_Free(b);
 			return;
 		}
-	BAN_Insert(b);
+	if (BAN_Insert(b) < 0) {
+		VCLI_Out(cli, "Shutdown in progress");
+		VCLI_SetResult(cli, CLIS_CANT);
+		return;
+	}
 }
 
 static void
@@ -1149,5 +1258,31 @@ BAN_Init(void)
 	AN(ban_magic);
 	ban_magic->flags |= BAN_F_GONE;
 	VSC_C_main->bans_gone++;
-	BAN_Insert(ban_magic);
+	AZ(BAN_Insert(ban_magic));
+}
+
+/*--------------------------------------------------------------------
+ * Shutdown of the ban system.
+ *
+ * When this function returns, no new bans will be accepted, and no
+ * bans will be dropped (ban lurker thread stopped), so that no
+ * STV_BanInfo calls will be executed.
+ */
+
+void
+BAN_Shutdown(void)
+{
+	void *status;
+
+	Lck_Lock(&ban_mtx);
+	ban_shutdown = 1;
+	Lck_Unlock(&ban_mtx);
+
+	AZ(pthread_join(ban_thread, &status));
+	AZ(status);
+
+	Lck_Lock(&ban_mtx);
+	/* Export the ban list to compact it */
+	ban_export();
+	Lck_Unlock(&ban_mtx);
 }

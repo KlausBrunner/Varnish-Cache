@@ -181,7 +181,7 @@ struct ws {
  */
 
 enum httpwhence {
-	HTTP_Req	= 1,
+	HTTP_Method	= 1,
 	HTTP_Resp,
 	HTTP_Bereq,
 	HTTP_Beresp,
@@ -582,6 +582,14 @@ struct object {
 
 /*--------------------------------------------------------------------*/
 
+enum req_body_state_e {
+	REQ_BODY_INIT = 0,
+	REQ_BODY_CL,
+	// REQ_BODY_CHUNKED,
+	REQ_BODY_DONE,
+	REQ_BODY_NONE
+};
+
 struct req {
 	unsigned		magic;
 #define REQ_MAGIC		0x2751aaa1
@@ -612,8 +620,12 @@ struct req {
 	struct exp		exp;
 	unsigned		cur_method;
 	unsigned		handling;
-	unsigned char		reqbodydone;
+
 	unsigned char		wantbody;
+	enum req_body_state_e	req_body_status;
+	uint64_t		req_bodybytes;
+
+	uint64_t		resp_bodybytes;
 
 	uint16_t		err_code;
 	const char		*err_reason;
@@ -621,7 +633,6 @@ struct req {
 	struct director		*director;
 	struct VCL_conf		*vcl;
 
-	uint64_t		req_bodybytes;
 	char			*ws_req;	/* WS above request data */
 
 	double			t_req;
@@ -746,8 +757,9 @@ struct ban *BAN_New(void);
 int BAN_AddTest(struct cli *, struct ban *, const char *, const char *,
     const char *);
 void BAN_Free(struct ban *b);
-void BAN_Insert(struct ban *b);
+int BAN_Insert(struct ban *b);
 void BAN_Init(void);
+void BAN_Shutdown(void);
 void BAN_NewObjCore(struct objcore *oc);
 void BAN_DestroyObj(struct objcore *oc);
 int BAN_CheckObject(struct object *o, struct req *sp);
@@ -765,6 +777,8 @@ void VBO_DerefBusyObj(struct worker *wrk, struct busyobj **busyobj);
 void VBO_Free(struct busyobj **vbo);
 
 /* cache_http1_fsm.c [HTTP1] */
+ssize_t HTTP1_GetReqBody(struct req *, void *buf, ssize_t len);
+int HTTP1_DiscardReqBody(struct req *req);
 void HTTP1_Session(struct worker *, struct req *);
 
 /* cache_req_fsm.c [CNT] */
@@ -802,7 +816,6 @@ int FetchError(struct busyobj *, const char *error);
 int FetchError2(struct busyobj *, const char *error, const char *more);
 int FetchHdr(struct req *req, int need_host_hdr, int sendbody);
 void FetchBody(struct worker *w, void *bo);
-int FetchReqBody(struct req *, int sendbody);
 void Fetch_Init(void);
 
 /* cache_gzip.c */
@@ -1059,7 +1072,8 @@ void STV_free(struct storage *st);
 void STV_open(void);
 void STV_close(void);
 void STV_Freestore(struct object *o);
-void STV_BanInfo(enum baninfo event, const uint8_t *ban, unsigned len);
+int STV_BanInfo(enum baninfo event, const uint8_t *ban, unsigned len);
+void STV_BanExport(const uint8_t *bans, unsigned len);
 
 /* storage_synth.c */
 struct vsb *SMS_Makesynth(struct object *obj);

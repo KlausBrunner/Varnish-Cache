@@ -78,7 +78,6 @@
 #include "vcs.h"
 #include "vpf.h"
 #include "vqueue.h"
-#include "vre.h"
 #include "vsb.h"
 
 #include "compat/daemon.h"
@@ -114,7 +113,7 @@ static struct logline {
 	VTAILQ_HEAD(, hdr) vcl_log;     /* VLC_Log entries */
 } **ll;
 
-struct VSM_data *vd;
+static struct VSM_data *vd;
 
 static size_t nll;
 
@@ -212,7 +211,6 @@ req_header(struct logline *l, const char *name)
 	VTAILQ_FOREACH(h, &l->req_headers, list) {
 		if (strcasecmp(h->key, name) == 0) {
 			return (h->value);
-			break;
 		}
 	}
 	return (NULL);
@@ -225,7 +223,6 @@ resp_header(struct logline *l, const char *name)
 	VTAILQ_FOREACH(h, &l->resp_headers, list) {
 		if (strcasecmp(h->key, name) == 0) {
 			return (h->value);
-			break;
 		}
 	}
 	return (NULL);
@@ -238,7 +235,6 @@ vcl_log(struct logline *l, const char *name)
 	VTAILQ_FOREACH(h, &l->vcl_log, list) {
 		if (strcasecmp(h->key, name) == 0) {
 			return (h->value);
-			break;
 		}
 	}
 	return (NULL);
@@ -304,7 +300,7 @@ collect_backend(struct logline *lp, enum VSL_tag_e tag, unsigned spec,
 			trimfield(&lp->df_h, ptr, end);
 		break;
 
-	case SLT_BereqRequest:
+	case SLT_BereqMethod:
 		if (!lp->active)
 			break;
 		if (lp->df_m != NULL) {
@@ -423,7 +419,7 @@ collect_client(struct logline *lp, enum VSL_tag_e tag, unsigned spec,
 		trimfield(&lp->df_h, ptr, end);
 		break;
 
-	case SLT_ReqRequest:
+	case SLT_ReqMethod:
 		if (!lp->active)
 			break;
 		if (lp->df_m != NULL) {
@@ -813,6 +809,7 @@ h_ncsa(void *priv, enum VSL_tag_e tag, unsigned fd,
 					p = tmp;
 					break;
 				}
+				/* FALLTHROUGH */
 			default:
 				fprintf(stderr,
 				    "Unknown format starting at: %s\n", --p);
@@ -940,7 +937,8 @@ main(int argc, char *argv[])
 			/* XXX: Silently ignored: it's required anyway */
 			break;
 		case 'm':
-			m_flag = 1; /* Fall through */
+			m_flag = 1;
+			/* FALLTHOUGH */
 		default:
 			if (VSL_Arg(vd, c, optarg) > 0)
 				break;

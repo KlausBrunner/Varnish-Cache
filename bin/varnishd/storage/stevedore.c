@@ -453,14 +453,39 @@ STV_close(void)
 		stv->close(stv);
 }
 
-void
+/*-------------------------------------------------------------------
+ * Notify the stevedores of BAN related events. A non-zero return
+ * value indicates that the stevedore is unable to persist the
+ * event.
+ */
+
+int
 STV_BanInfo(enum baninfo event, const uint8_t *ban, unsigned len)
+{
+	struct stevedore *stv;
+	int r = 0;
+
+	VTAILQ_FOREACH(stv, &stv_stevedores, list)
+		if (stv->baninfo != NULL)
+			r |= stv->baninfo(stv, event, ban, len);
+
+	return (r);
+}
+
+/*-------------------------------------------------------------------
+ * Export a complete ban list to the stevedores for persistence.
+ * The stevedores should clear any previous ban lists and replace
+ * them with this list.
+ */
+
+void
+STV_BanExport(const uint8_t *bans, unsigned len)
 {
 	struct stevedore *stv;
 
 	VTAILQ_FOREACH(stv, &stv_stevedores, list)
-		if (stv->baninfo != NULL)
-			stv->baninfo(stv, event, ban, len);
+		if (stv->banexport != NULL)
+			stv->banexport(stv, bans, len);
 }
 
 /*--------------------------------------------------------------------
