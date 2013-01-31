@@ -54,8 +54,17 @@
 #include <sys/epoll.h>
 #endif
 
-
 #include "common/params.h"
+
+/*--------------------------------------------------------------------*/
+
+enum req_fsm_nxt {
+	REQ_FSM_MORE,
+	REQ_FSM_DONE,
+	REQ_FSM_DISEMBARK,
+};
+
+/*--------------------------------------------------------------------*/
 
 enum body_status {
 #define BODYSTATUS(U,l)	BS_##U,
@@ -63,17 +72,13 @@ enum body_status {
 #undef BODYSTATUS
 };
 
-static inline const char *
-body_status(enum body_status e)
-{
-	switch(e) {
-#define BODYSTATUS(U,l)	case BS_##U: return (#l);
-#include "tbl/body_status.h"
-#undef BODYSTATUS
-	default:
-		return ("?");
-	}
-}
+/*--------------------------------------------------------------------*/
+
+enum req_body_state_e {
+#define REQ_BODY(U)	REQ_BODY_##U,
+#include <tbl/req_body.h>
+#undef REQ_BODY
+};
 
 /*--------------------------------------------------------------------*/
 
@@ -83,19 +88,6 @@ enum sess_close {
 #include "tbl/sess_close.h"
 #undef SESS_CLOSE
 };
-
-static inline const char *
-sess_close_str(enum sess_close sc, int want_desc)
-{
-	switch (sc) {
-	case SC_NULL:		return(want_desc ? "(null)": "NULL");
-#define SESS_CLOSE(nm, desc)	case SC_##nm: return(want_desc ? desc : #nm);
-#include "tbl/sess_close.h"
-#undef SESS_CLOSE
-
-	default:		return(want_desc ? "(invalid)" : "INVALID");
-	}
-}
 
 /*--------------------------------------------------------------------*/
 
@@ -111,6 +103,8 @@ enum {
 #undef SLTH
 };
 
+/*--------------------------------------------------------------------*/
+
 struct SHA256Context;
 struct VSC_C_lck;
 struct ban;
@@ -118,6 +112,7 @@ struct busyobj;
 struct cli;
 struct cli_proto;
 struct director;
+struct http_conn;
 struct iovec;
 struct mempool;
 struct objcore;
@@ -213,11 +208,18 @@ struct http {
 
 /*--------------------------------------------------------------------
  * HTTP Protocol connection structure
+ *
+ * This is the protocol independent object for a HTTP connection, used
+ * both for backend and client sides.
+ *
  */
+
+typedef ssize_t htc_read(struct http_conn *, void *, size_t);
 
 struct http_conn {
 	unsigned		magic;
 #define HTTP_CONN_MAGIC		0x3e19edd1
+	htc_read		*read;
 
 	int			fd;
 	struct vsl_log		*vsl;
@@ -226,6 +228,7 @@ struct http_conn {
 	struct ws		*ws;
 	txt			rxbuf;
 	txt			pipeline;
+	enum body_status	body_status;
 };
 
 /*--------------------------------------------------------------------*/
@@ -250,11 +253,9 @@ struct dstat {
 
 /* Fetch processors --------------------------------------------------*/
 
-void VFP_update_length(const struct busyobj *, ssize_t);
-
-typedef void vfp_begin_f(struct busyobj *, size_t );
-typedef int vfp_bytes_f(struct busyobj *, struct http_conn *, ssize_t);
-typedef int vfp_end_f(struct busyobj *);
+typedef void vfp_begin_f(void *priv, size_t );
+typedef int vfp_bytes_f(void *priv, struct http_conn *, ssize_t);
+typedef int vfp_end_f(void *priv);
 
 struct vfp {
 	vfp_begin_f	*begin;
@@ -516,7 +517,6 @@ struct busyobj {
 	struct exp		exp;
 	struct http_conn	htc;
 
-	enum body_status	body_status;
 	struct pool_task	fetch_task;
 
 	struct vef_priv		*vef_priv;
@@ -582,14 +582,6 @@ struct object {
 
 /*--------------------------------------------------------------------*/
 
-enum req_body_state_e {
-	REQ_BODY_INIT = 0,
-	REQ_BODY_CL,
-	// REQ_BODY_CHUNKED,
-	REQ_BODY_DONE,
-	REQ_BODY_NONE
-};
-
 struct req {
 	unsigned		magic;
 #define REQ_MAGIC		0x2751aaa1
@@ -604,6 +596,8 @@ struct req {
 	struct worker		*wrk;
 	enum req_step		req_step;
 	VTAILQ_ENTRY(req)	w_list;
+
+	struct storagehead	body;
 
 	/* The busy objhead we sleep on */
 	struct objhead		*hash_objhead;
@@ -775,14 +769,17 @@ void VBO_Init(void);
 struct busyobj *VBO_GetBusyObj(struct worker *, struct req *);
 void VBO_DerefBusyObj(struct worker *wrk, struct busyobj **busyobj);
 void VBO_Free(struct busyobj **vbo);
+void VBO_extend(const struct busyobj *, ssize_t);
 
 /* cache_http1_fsm.c [HTTP1] */
-ssize_t HTTP1_GetReqBody(struct req *, void *buf, ssize_t len);
-int HTTP1_DiscardReqBody(struct req *req);
+typedef int (req_body_iter_f)(struct req *, void *priv, void *ptr, size_t);
 void HTTP1_Session(struct worker *, struct req *);
+int HTTP1_DiscardReqBody(struct req *req);
+int HTTP1_CacheReqBody(struct req *req, ssize_t maxsize);
+int HTTP1_IterateReqBody(struct req *req, req_body_iter_f *func, void *priv);
 
 /* cache_req_fsm.c [CNT] */
-int CNT_Request(struct worker *, struct req *);
+enum req_fsm_nxt CNT_Request(struct worker *, struct req *);
 
 /* cache_cli.c [CLI] */
 void CLI_Init(void);
@@ -854,7 +851,6 @@ const char *http_StatusMessage(unsigned);
 unsigned http_EstimateWS(const struct http *fm, unsigned how, uint16_t *nhd);
 void HTTP_Init(void);
 void http_ClrHeader(struct http *to);
-unsigned http_Write(const struct worker *w, const struct http *hp, int resp);
 void http_SetResp(struct http *to, const char *proto, uint16_t status,
     const char *response);
 void http_FilterReq(const struct req *, unsigned how);
@@ -878,28 +874,31 @@ double http_GetHdrQ(const struct http *hp, const char *hdr, const char *field);
 uint16_t http_GetStatus(const struct http *hp);
 const char *http_GetReq(const struct http *hp);
 int http_HdrIs(const struct http *hp, const char *hdr, const char *val);
-uint16_t http_DissectRequest(struct req *);
-uint16_t http_DissectResponse(struct http *sp, const struct http_conn *htc);
 enum sess_close http_DoConnection(const struct http *);
 void http_CopyHome(const struct http *hp);
 void http_Unset(struct http *hp, const char *hdr);
 void http_CollectHdr(struct http *hp, const char *hdr);
+void http_VSLH(const struct http *hp, unsigned hdr);
 
-/* cache_httpconn.c */
+/* cache_http1_proto.c */
+
 enum htc_status_e {
-	HTC_ALL_WHITESPACE =	-3,
-	HTC_OVERFLOW =		-2,
-	HTC_ERROR_EOF =		-1,
-	HTC_NEED_MORE =		 0,
-	HTC_COMPLETE =		 1
+	HTTP1_ALL_WHITESPACE =	-3,
+	HTTP1_OVERFLOW =	-2,
+	HTTP1_ERROR_EOF =	-1,
+	HTTP1_NEED_MORE =	 0,
+	HTTP1_COMPLETE =	 1
 };
 
-void HTC_Init(struct http_conn *htc, struct ws *ws, int fd, struct vsl_log *,
+void HTTP1_Init(struct http_conn *htc, struct ws *ws, int fd, struct vsl_log *,
     unsigned maxbytes, unsigned maxhdr);
-enum htc_status_e HTC_Reinit(struct http_conn *htc);
-enum htc_status_e HTC_Rx(struct http_conn *htc);
-ssize_t HTC_Read(struct http_conn *htc, void *d, size_t len);
-enum htc_status_e HTC_Complete(struct http_conn *htc);
+enum htc_status_e HTTP1_Reinit(struct http_conn *htc);
+enum htc_status_e HTTP1_Rx(struct http_conn *htc);
+ssize_t HTTP1_Read(struct http_conn *htc, void *d, size_t len);
+enum htc_status_e HTTP1_Complete(struct http_conn *htc);
+uint16_t HTTP1_DissectRequest(struct req *);
+uint16_t HTTP1_DissectResponse(struct http *sp, const struct http_conn *htc);
+unsigned HTTP1_Write(const struct worker *w, const struct http *hp, int resp);
 
 #define HTTPH(a, b, c) extern char b[];
 #include "tbl/http_headers.h"
@@ -947,6 +946,8 @@ void MPL_Free(struct mempool *mpl, void *item);
 
 /* cache_panic.c */
 void PAN_Init(void);
+const char *body_status_2str(enum body_status e);
+const char *sess_close_2str(enum sess_close sc, int want_desc);
 
 /* cache_pipe.c */
 void PipeRequest(struct req *req);
@@ -1074,6 +1075,7 @@ void STV_close(void);
 void STV_Freestore(struct object *o);
 int STV_BanInfo(enum baninfo event, const uint8_t *ban, unsigned len);
 void STV_BanExport(const uint8_t *bans, unsigned len);
+struct storage *STV_alloc_transient(size_t size);
 
 /* storage_synth.c */
 struct vsb *SMS_Makesynth(struct object *obj);

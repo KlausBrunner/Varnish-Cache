@@ -327,7 +327,7 @@ SES_Delete(struct sess *sp, enum sess_close reason, double now)
 
 	b = &sp->acct_ses;
 	VSL(SLT_SessClose, sp->vxid, "%s %.3f %ju %ju %ju %ju %ju %ju",
-	    sess_close_str(sp->reason, 0), now - sp->t_open, b->req,
+	    sess_close_2str(sp->reason, 0), now - sp->t_open, b->req,
 	    b->pipe, b->pass, b->fetch, b->hdrbytes, b->bodybytes);
 
 	MPL_Free(pp->mpl_sess, sp);
@@ -393,6 +393,8 @@ SES_GetReq(struct worker *wrk, struct sess *sp)
 
 	req->t_req = NAN;
 	req->t_resp = NAN;
+
+	VTAILQ_INIT(&req->body);
 
 	return (req);
 }
