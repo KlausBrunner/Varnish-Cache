@@ -262,13 +262,18 @@ ban_equal(const uint8_t *bs1, const uint8_t *bs2)
 static void
 ban_mark_gone(struct ban *b)
 {
+	unsigned ln;
 
 	CHECK_OBJ_NOTNULL(b, BAN_MAGIC);
+	AN(b->spec);
+	AZ(b->flags & BAN_F_GONE);
+	ln = ban_len(b->spec);
 	b->flags |= BAN_F_GONE;
 	b->spec[BANS_FLAGS] |= BANS_FLAG_GONE;
 	VWMB();
-	vbe32enc(b->spec + BANS_LENGTH, 0);
+	vbe32enc(b->spec + BANS_LENGTH, BANS_HEAD_LEN);
 	VSC_C_main->bans_gone++;
+	VSC_C_main->bans_persisted_fragmentation += ln - ban_len(b->spec);
 }
 
 /*--------------------------------------------------------------------
@@ -484,6 +489,7 @@ BAN_Insert(struct ban *b)
 	 * the stevedores has been opened, but before any new objects
 	 * can have entered the cache (thus no objects in the mean
 	 * time depending on ban_magic in the list) */
+	VSC_C_main->bans_persisted_bytes += ln;
 	if (b != ban_magic)
 		ban_info(BI_NEW, b->spec, ln); /* Notify stevedores */
 	Lck_Unlock(&ban_mtx);
@@ -584,17 +590,21 @@ ban_export(void)
 {
 	struct ban *b;
 	struct vsb vsb;
+	unsigned ln;
 
 	Lck_AssertHeld(&ban_mtx);
-	/* XXX: Use the ban entry size measurements to hit the target
-	 * and avoid multiple allocations */
-	AN(VSB_new(&vsb, NULL, 64 * VSC_C_main->bans, VSB_AUTOEXTEND));
+	ln = VSC_C_main->bans_persisted_bytes -
+	    VSC_C_main->bans_persisted_fragmentation;
+	AN(VSB_new(&vsb, NULL, ln, VSB_AUTOEXTEND));
 	VTAILQ_FOREACH_REVERSE(b, &ban_head, banhead_s, list) {
 		AZ(VSB_bcat(&vsb, b->spec, ban_len(b->spec)));
 	}
 	AZ(VSB_finish(&vsb));
+	assert(VSB_len(&vsb) == ln);
 	STV_BanExport((const uint8_t *)VSB_data(&vsb), VSB_len(&vsb));
 	VSB_delete(&vsb);
+	VSC_C_main->bans_persisted_bytes = ln;
+	VSC_C_main->bans_persisted_fragmentation = 0;
 }
 
 static void
@@ -624,7 +634,7 @@ static void
 ban_reload(const uint8_t *ban, unsigned len)
 {
 	struct ban *b, *b2;
-	int gone = 0;
+	int duplicate = 0;
 	double t0, t1, t2 = 9e99;
 
 	ASSERT_CLI();
@@ -641,11 +651,8 @@ ban_reload(const uint8_t *ban, unsigned len)
 			return;
 		if (t1 < t0)
 			break;
-		if (ban_equal(b->spec, ban)) {
-			gone |= BAN_F_GONE;
-			VSC_C_main->bans_dups++;
-			VSC_C_main->bans_gone++;
-		}
+		if (ban_equal(b->spec, ban))
+			duplicate = 1;
 	}
 
 	VSC_C_main->bans++;
@@ -656,15 +663,19 @@ ban_reload(const uint8_t *ban, unsigned len)
 	b2->spec = malloc(len);
 	AN(b2->spec);
 	memcpy(b2->spec, ban, len);
-	b2->flags |= gone;
 	if (ban[BANS_FLAGS] & BANS_FLAG_REQ) {
 		VSC_C_main->bans_req++;
 		b2->flags |= BAN_F_REQ;
 	}
+	if (duplicate)
+		VSC_C_main->bans_dups++;
+	if (duplicate || (ban[BANS_FLAGS] & BANS_FLAG_GONE))
+		ban_mark_gone(b2);
 	if (b == NULL)
 		VTAILQ_INSERT_TAIL(&ban_head, b2, list);
 	else
 		VTAILQ_INSERT_BEFORE(b, b2, list);
+	VSC_C_main->bans_persisted_bytes += len;
 
 	/* Hunt down older duplicates */
 	for (b = VTAILQ_NEXT(b2, list); b != NULL; b = VTAILQ_NEXT(b, list)) {
@@ -930,6 +941,8 @@ ban_cleantail(void)
 			VSC_C_main->bans--;
 			VSC_C_main->bans_deleted++;
 			VTAILQ_REMOVE(&ban_head, b, list);
+			VSC_C_main->bans_persisted_fragmentation +=
+			    ban_len(b->spec);
 			ban_info(BI_DROP, b->spec, ban_len(b->spec));
 		} else {
 			b = NULL;
@@ -1256,9 +1269,8 @@ BAN_Init(void)
 
 	ban_magic = BAN_New();
 	AN(ban_magic);
-	ban_magic->flags |= BAN_F_GONE;
-	VSC_C_main->bans_gone++;
 	AZ(BAN_Insert(ban_magic));
+	ban_mark_gone(ban_magic);
 }
 
 /*--------------------------------------------------------------------

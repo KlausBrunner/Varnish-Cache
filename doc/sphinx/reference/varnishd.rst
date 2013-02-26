@@ -92,11 +92,15 @@ OPTIONS
 -S file     Path to a file containing a secret used for authorizing access to the management port.
 
 -s [name=]type[,options]
-            Use the specified storage backend.  See Storage Types for a list of supported storage
-            types.  This option can be used multiple times to specify multiple storage files. You
- 	    can name the different backends. Varnish will then reference that backend with the 
-	    given name in logs, statistics, etc. You will also be able to ask Varnish to use
-            these named backends specifically through VCL by setting backend.storage in vcl_fetch.
+            Use the specified storage backend. The storage backends can be one of the following:
+               * malloc[,size]
+               * file[,path[,size[,granularity]]]
+               * persistent,path,size
+
+            See Storage Types in the Users Guide for more information
+            on the various storage backends.  This option can be used
+            multiple times to specify multiple storage files. Names
+            are referenced in logs, vcl, statistics, etc.
 
 -T address[:port]
             Offer a management interface on the specified address and port.  See Management
@@ -151,13 +155,6 @@ critbit
   A self-scaling tree structure. The default hash algorithm in 2.1. In
   comparison to a more traditional B tree the critbit tree is almost
   completely lockless.
-
-Storage Types
--------------
-
-The following storage types are available:
-
-.. include:: ../include/storage_backends.rst
 
 Management Interface
 --------------------

@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2010 Varnish Software AS
+ * Copyright (c) 2013 Varnish Software AS
  * All rights reserved.
  *
- * Author: Poul-Henning Kamp <phk@phk.freebsd.dk>
+ * Author: Poul-Henning Kamp <phk@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -24,20 +24,65 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
 
-/*lint -save -e525 -e539 */
-VCC_SYMB(NONE,		none)
-VCC_SYMB(VAR,		var)
-VCC_SYMB(FUNC,		func)		/* VMOD function */
-VCC_SYMB(PROC,		proc)		/* VMOD procedure */
-VCC_SYMB(VMOD,		vmod)
-VCC_SYMB(ACL,		acl)
-VCC_SYMB(SUB,		sub)		/* VCL subroutine */
-VCC_SYMB(BACKEND,	backend)
-VCC_SYMB(PROBE,		probe)
-VCC_SYMB(WILDCARD,	wildcard)
-VCC_SYMB(OBJECT,	object)
-VCC_SYMB(METHOD,	method)
-/*lint -restore */
+#include "config.h"
+
+#include <stdlib.h>
+
+#include "cache/cache.h"
+
+#include "vrt.h"
+#include "vcc_if.h"
+
+struct vmod_debug_obj {
+	unsigned		magic;
+#define VMOD_DEBUG_OBJ_MAGIC	0xccbd9b77
+	int foobar;
+};
+
+VCL_VOID
+vmod_obj__init(struct req *req, struct vmod_debug_obj **op, VCL_STRING s)
+{
+	struct vmod_debug_obj *o;
+
+	(void)req;
+	(void)s;
+	AN(op);
+	AZ(*op);
+	ALLOC_OBJ(o, VMOD_DEBUG_OBJ_MAGIC);
+	AN(o);
+	*op = o;
+	o->foobar = 42;
+	AN(*op);
+}
+
+VCL_VOID
+vmod_obj__fini(struct req *req, struct vmod_debug_obj **op)
+{
+
+	(void)req;
+	AN(op);
+	AN(*op);
+	FREE_OBJ(*op);
+	*op = NULL;
+}
+
+VCL_STRING __match_proto__()
+vmod_obj_foo(struct req *req, struct vmod_debug_obj *o, VCL_STRING s)
+{
+	(void)req;
+	(void)s;
+	CHECK_OBJ_NOTNULL(o, VMOD_DEBUG_OBJ_MAGIC);
+	assert(o->foobar == 42);
+	return ("BOO");
+}
+
+VCL_TIME __match_proto__()
+vmod_obj_date(struct req *req, struct vmod_debug_obj *o)
+{
+	(void)req;
+	CHECK_OBJ_NOTNULL(o, VMOD_DEBUG_OBJ_MAGIC);
+	assert(o->foobar == 42);
+	return (21.4);
+}

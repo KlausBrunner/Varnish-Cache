@@ -4,7 +4,7 @@ Copyright (c) 2006-2011 Varnish Software AS])
 AC_REVISION([$Id$])
 AC_INIT([Varnish], [trunk], [varnish-dev@varnish-cache.org])
 AC_CONFIG_SRCDIR(include/miniobj.h)
-AM_CONFIG_HEADER(config.h)
+AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
 AC_USE_SYSTEM_EXTENSIONS
 
@@ -420,6 +420,38 @@ fi
 if test "$ac_cv_so_rcvtimeo_works" = no ||
    test "$ac_cv_so_sndtimeo_works" = no; then
 	AC_MSG_WARN([connection timeouts will not work])
+fi
+LIBS="${save_LIBS}"
+
+# Check if the OS supports TCP_KEEP(CNT|IDLE|INTVL) socket options
+save_LIBS="${LIBS}"
+LIBS="${LIBS} ${NET_LIBS}"
+AC_CACHE_CHECK([for TCP_KEEP(CNT|IDLE|INTVL) socket options],
+  [ac_cv_have_tcp_keep],
+  [AC_RUN_IFELSE(
+    [AC_LANG_PROGRAM([[
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+    ]],[[
+int s = socket(AF_INET, SOCK_STREAM, 0);
+int i;
+i = 5;
+if (setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &i, sizeof i))
+  return (1);
+if (setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &i, sizeof i))
+  return (1);
+if (setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &i, sizeof i))
+  return (1);
+return (0);
+    ]])],
+    [ac_cv_have_tcp_keep=yes],
+    [ac_cv_have_tcp_keep=no])
+  ])
+if test "$ac_cv_have_tcp_keep" = yes; then
+   AC_DEFINE([HAVE_TCP_KEEP], [1], [Define if OS supports TCP_KEEP* socket options])
 fi
 LIBS="${save_LIBS}"
 
