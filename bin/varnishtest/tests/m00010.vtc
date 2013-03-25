@@ -1,0 +1,75 @@
+varnishtest "Test vmod.directors round robin director in stacked fashion"
+
+
+server s1 {
+	rxreq
+	txresp -body "1"
+} -start
+
+server s2 {
+	rxreq
+	txresp -body "22"
+} -start
+
+
+server s3 {
+	rxreq
+	txresp -body "333"
+} -start
+
+server s4 {
+	rxreq
+	txresp -body "4444"
+} -start
+
+
+varnish v1 -vcl+backend {
+
+	import directors from "${topbuild}/lib/libvmod_directors/.libs/libvmod_directors.so" ;
+	sub vcl_init {
+		new rr1 = directors.round_robin();
+		rr1.add_backend(s1);
+		rr1.add_backend(s3);
+
+		new rr2 = directors.round_robin();
+		rr2.add_backend(s2);
+		rr2.add_backend(s4);
+
+		new rr3 = directors.round_robin();
+		rr3.add_backend(rr1.backend());
+		rr3.add_backend(rr2.backend());
+	}
+
+	sub vcl_recv {
+		set req.backend = rr3.backend();
+	}
+} -start
+
+client c1 {
+	timeout 3
+	txreq -url "/foo1"
+	rxresp
+	expect resp.bodylen == 1
+	txreq -url "/foo2"
+	rxresp
+	expect resp.bodylen == 2
+	txreq -url "/foo3"
+	rxresp
+	expect resp.bodylen == 3
+	txreq -url "/foo4"
+	rxresp
+	expect resp.bodylen == 4
+} -run
+
+server s1 -start
+server s2 -start
+
+client c2 {
+	timeout 3
+	txreq -url "/foo11"
+	rxresp
+	expect resp.bodylen == 1
+	txreq -url "/foo22"
+	rxresp
+	expect resp.bodylen == 2
+} -run

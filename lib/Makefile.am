@@ -8,6 +8,7 @@ SUBDIRS = \
 	libvgz \
 	libvmod_debug \
 	libvmod_std \
+	libvmod_directors \
 	@JEMALLOC_SUBDIR@
 
 DIST_SUBDIRS = 	\
@@ -18,4 +19,5 @@ DIST_SUBDIRS = 	\
 	libvgz \
 	libvmod_debug \
 	libvmod_std \
+	libvmod_directors \
 	libjemalloc

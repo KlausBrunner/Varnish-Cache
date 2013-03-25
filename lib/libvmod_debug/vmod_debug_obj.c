@@ -42,11 +42,13 @@ struct vmod_debug_obj {
 };
 
 VCL_VOID
-vmod_obj__init(struct req *req, struct vmod_debug_obj **op, VCL_STRING s)
+vmod_obj__init(struct req *req, struct vmod_debug_obj **op,
+    const char *vcl_name, VCL_STRING s)
 {
 	struct vmod_debug_obj *o;
 
 	(void)req;
+	(void)vcl_name;
 	(void)s;
 	AN(op);
 	AZ(*op);

@@ -102,6 +102,10 @@ sub vcl_miss {
 }
 
 sub vcl_fetch {
+    return (fetch);
+}
+
+sub vcl_response {
     if (beresp.ttl <= 0s ||
         beresp.http.Set-Cookie ||
         beresp.http.Surrogate-control ~ "no-store" ||

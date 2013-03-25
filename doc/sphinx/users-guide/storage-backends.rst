@@ -1,9 +1,8 @@
-
-
 .. _guide-storage:
 
 Storage backends
 ----------------
+
 
 Intro
 ~~~~~
@@ -20,10 +19,9 @@ malloc
 syntax: malloc[,size]
 
 Malloc is a memory based backend. Each object will be allocated from
-memory. If your system runs low on memory swap will be used. 
-
-Be aware that the size limitation only limits the actual storage and
-that approximately 1k of memory per object will be used for various
+memory. If your system runs low on memory swap will be used. Be aware
+that the size limitation only limits the actual storage and that
+approximately 1k of memory per object will be used for various
 internal structures.
 
 The size parameter specifies the maximum amount of memory varnishd
@@ -38,10 +36,11 @@ one of the following suffixes:
 
       T, t    The size is expressed in tebibytes.
 
-If no size is given the malloc backend will not limit how much memory
-it can allocate.
+The default size is unlimited. 
 
-Mallocs performance is bound by memory speed so it is very fast. 
+Mallocs performance is bound by memory speed so it is very fast. If
+the dataset is bigger than what can fit in memory performance will
+depend on the operating system and how well it doesn paging. 
 
 file
 ~~~~
@@ -57,7 +56,7 @@ the path to a directory in which varnishd will create the backing
 file.  The default is /tmp.
 
 The size parameter specifies the size of the backing file.  The size
-is assumed to be in bytes, unless fol‐ lowed by one of the following
+is assumed to be in bytes, unless followed by one of the following
 suffixes:
 
       K, k    The size is expressed in kibibytes.

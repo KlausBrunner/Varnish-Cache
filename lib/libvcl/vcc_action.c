@@ -220,9 +220,9 @@ parse_new(struct vcc *tl)
 
 	vcc_NextToken(tl);
 
-	bprintf(buf1, ", &%s", sy1->name);
+	bprintf(buf1, ", &%s, \"%s\"", sy1->name, sy1->name);
 	vcc_Eval_Func(tl, s_init, buf1, "ASDF", s_init + strlen(s_init) + 1);
-	Ff(tl, 0, "\t%s((struct req*)0, &%s);\n", s_fini, sy1->name);
+	Fd(tl, 0, "\t%s((struct req*)0, &%s);\n", s_fini, sy1->name);
 	ExpectErr(tl, ';');
 
 	bprintf(buf1, ", %s", sy1->name);
@@ -231,10 +231,16 @@ parse_new(struct vcc *tl)
 		p += strlen(s_obj);
 		bprintf(buf2, "%s%s", sy1->name, p);
 		sy3 = VCC_AddSymbolStr(tl, buf2, SYM_FUNC);
+		AN(sy3);
 		sy3->eval = vcc_Eval_SymFunc;
 		p += strlen(p) + 1;
 		sy3->cfunc = p;
 		p += strlen(p) + 1;
+
+		/* Functions which return VOID are procedures */
+		if (!memcmp(p, "VOID\0", 5))
+			sy3->kind = SYM_PROC;
+
 		sy3->args = p;
 		sy3->extra = TlDup(tl, buf1);
 		while (p[0] != '\0' || p[1] != '\0')
@@ -366,7 +372,7 @@ static struct action_table {
 } action_table[] = {
 	{ "error",		parse_error,
 	    VCL_MET_RECV | VCL_MET_PIPE | VCL_MET_PASS | VCL_MET_HASH |
-            VCL_MET_MISS | VCL_MET_HIT | VCL_MET_FETCH
+            VCL_MET_MISS | VCL_MET_HIT | VCL_MET_RESPONSE
 	},
 
 #define VCL_RET_MAC(l, U, B)						\

@@ -725,7 +725,7 @@ mcf_param_show(struct cli *cli, const char * const *av, void *priv)
 }
 
 /*--------------------------------------------------------------------
- * Mark paramters as protected
+ * Mark parameters as protected
  */
 
 void
@@ -950,6 +950,10 @@ MCF_DumpRstParam(void)
 				printf("%sexperimental", q);
 				q = ", ";
 			}
+			if (pp->flags & WIZARD) {
+				printf("%swizard", q);
+				q = ", ";
+			}
 			printf("\n");
 		}
 		printf("\n\t");
@@ -973,5 +977,4 @@ MCF_DumpRstParam(void)
 		}
 		printf("\n\n");
 	}
-	printf("\n");
 }

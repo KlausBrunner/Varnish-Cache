@@ -170,6 +170,7 @@ struct vcc {
 	struct vsb		*fc;		/* C-code */
 	struct vsb		*fh;		/* H-code (before C-code) */
 	struct vsb		*fi;		/* Init func code */
+	struct vsb		*fd;		/* Object destructors */
 	struct vsb		*ff;		/* Finish func code */
 	struct vsb		*fb;		/* Body of current sub
 						 * NULL otherwise
@@ -226,18 +227,12 @@ int vcc_ParseAction(struct vcc *tl);
 
 /* vcc_backend.c */
 struct fld_spec;
-typedef void parsedirector_f(struct vcc *tl);
 
 void vcc_ParseProbe(struct vcc *tl);
 void vcc_ParseDirector(struct vcc *tl);
-void vcc_ParseBackendHost(struct vcc *tl, int serial, char **nm);
 struct fld_spec * vcc_FldSpec(struct vcc *tl, const char *first, ...);
-void vcc_ResetFldSpec(struct fld_spec *f);
 void vcc_IsField(struct vcc *tl, struct token **t, struct fld_spec *fs);
 void vcc_FieldsOk(struct vcc *tl, const struct fld_spec *fs);
-
-void Emit_Sockaddr(struct vcc *tl, const struct token *t_host,
-    const char *port);
 
 /* vcc_compile.c */
 extern struct method method_tab[];
@@ -258,6 +253,8 @@ void Fi(const struct vcc *tl, int indent, const char *fmt, ...)
     __printflike(3, 4);
 void Ff(const struct vcc *tl, int indent, const char *fmt, ...)
     __printflike(3, 4);
+void Fd(const struct vcc *tl, int indent, const char *fmt, ...)
+    __printflike(3, 4);
 void EncToken(struct vsb *sb, const struct token *t);
 int IsMethod(const struct token *t);
 void *TlAlloc(struct vcc *tl, unsigned len);
@@ -265,12 +262,6 @@ char *TlDup(struct vcc *tl, const char *s);
 char *TlDupTok(struct vcc *tl, const struct token *tok);
 
 void EncString(struct vsb *sb, const char *b, const char *e, int mode);
-
-/* vcc_dir_random.c */
-parsedirector_f vcc_ParseRandomDirector;
-
-/* vcc_dir_round_robin.c */
-parsedirector_f vcc_ParseRoundRobinDirector;
 
 /* vcc_expr.c */
 void vcc_Duration(struct vcc *tl, double *);
@@ -283,9 +274,6 @@ sym_expr_t vcc_Eval_SymFunc;
 void vcc_Eval_Func(struct vcc *tl, const char *cfunc, const char *extra,
     const char *name, const char *args);
 sym_expr_t vcc_Eval_Backend;
-
-/* vcc_dir_dns.c */
-parsedirector_f vcc_ParseDnsDirector;
 
 /* vcc_obj.c */
 extern const struct var vcc_vars[];
@@ -319,7 +307,6 @@ void vcc_ErrWhere(struct vcc *, const struct token *);
 void vcc_ErrWhere2(struct vcc *, const struct token *, const struct token *);
 
 void vcc__Expect(struct vcc *tl, unsigned tok, unsigned line);
-int vcc_Teq(const struct token *t1, const struct token *t2);
 int vcc_IdIs(const struct token *t, const char *p);
 void vcc_ExpectCid(struct vcc *tl);
 void vcc_Lexer(struct vcc *tl, struct source *sp);

@@ -148,16 +148,10 @@ AC_SUBST(PCRE_LIBS)
 
 PKG_CHECK_MODULES([LIBEDIT], [libedit], 
 	[AC_DEFINE([HAVE_LIBEDIT], [1], [Define we have libedit])],
-	[AC_CHECK_HEADERS([readline/readline.h])
-	 AC_CHECK_HEADERS([edit/readline/readline.h])
-	 AC_CHECK_HEADERS([readline/history.h])
-	 AC_CHECK_LIB(edit, el_init,
-	        [ AC_DEFINE([HAVE_LIBEDIT], [1], [Define we have libedit])
-		  LIBEDIT_CFLAGS=""
-		  LIBEDIT_LIBS="-ledit ${CURSES_LIBS}"
-		],
-               [AC_MSG_WARN([libedit not found, disabling libedit support])],
-               [${CURSES_LIBS}])])
+	[AX_LIB_READLINE])
+if test "$ac_cv_have_readline" = no; then
+  AC_MSG_ERROR([libedit or readline not found])
+fi
 
 # Checks for header files.
 AC_HEADER_STDC
@@ -607,6 +601,7 @@ AC_CONFIG_FILES([
     lib/libvgz/Makefile
     lib/libvmod_debug/Makefile
     lib/libvmod_std/Makefile
+    lib/libvmod_directors/Makefile
     lib/libjemalloc/Makefile
     man/Makefile
     redhat/Makefile

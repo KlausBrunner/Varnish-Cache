@@ -267,6 +267,7 @@ cnt_error(struct worker *wrk, struct req *req)
 	AZ(req->obj);
 	AZ(req->busyobj);
 
+	req->acct_req.error++;
 	bo = VBO_GetBusyObj(wrk, req);
 	req->busyobj = bo;
 	AZ(bo->stats);
@@ -279,11 +280,16 @@ cnt_error(struct worker *wrk, struct req *req)
 	if (req->obj == NULL) {
 		req->doclose = SC_OVERLOAD;
 		req->director = NULL;
+		AZ(HSH_Deref(&wrk->stats, req->objcore, NULL));
+		req->objcore = NULL;
 		http_Teardown(bo->beresp);
 		http_Teardown(bo->bereq);
+		VBO_DerefBusyObj(wrk, &req->busyobj);
+		AZ(req->busyobj);
 		return (REQ_FSM_DONE);
 	}
 	CHECK_OBJ_NOTNULL(req->obj, OBJECT_MAGIC);
+	AZ(req->objcore);
 	req->obj->vxid = bo->vsl->wid;
 	req->obj->exp.entered = req->t_req;
 
@@ -410,7 +416,7 @@ cnt_fetch(struct worker *wrk, struct req *req)
 		AZ(bo->do_esi);
 		AZ(bo->do_pass);
 
-		VCL_fetch_method(req);
+		VCL_response_method(req);
 
 		if (bo->do_pass)
 			req->objcore->flags |= OC_F_PASS;
@@ -481,6 +487,7 @@ cnt_fetchbody(struct worker *wrk, struct req *req)
 
 	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
 	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
+	CHECK_OBJ_NOTNULL(req->objcore, OBJCORE_MAGIC);
 	bo = req->busyobj;
 	CHECK_OBJ_NOTNULL(bo, BUSYOBJ_MAGIC);
 
@@ -565,13 +572,24 @@ cnt_fetchbody(struct worker *wrk, struct req *req)
 
 	/* Create Vary instructions */
 	if (req->objcore->objhead != NULL) {
-		CHECK_OBJ_NOTNULL(req->objcore, OBJCORE_MAGIC);
-		vary = VRY_Create(req, bo->beresp);
-		if (vary != NULL) {
-			varyl = VSB_len(vary);
-			assert(varyl > 0);
+		varyl = VRY_Create(req, bo->beresp, &vary);
+		if (varyl > 0) {
+			AN(vary);
+			assert(varyl == VSB_len(vary));
 			l += varyl;
-		}
+		} else if (varyl < 0) {
+			/* Vary parse error */
+			AZ(vary);
+			req->err_code = 503;
+			req->req_step = R_STP_ERROR;
+			AZ(HSH_Deref(&wrk->stats, req->objcore, NULL));
+			req->objcore = NULL;
+			VDI_CloseFd(&bo->vbc);
+			VBO_DerefBusyObj(wrk, &req->busyobj);
+			return (REQ_FSM_MORE);
+		} else
+			/* No vary */
+			AZ(vary);
 	}
 
 	/*
@@ -604,6 +622,8 @@ cnt_fetchbody(struct worker *wrk, struct req *req)
 	if (req->obj == NULL) {
 		req->err_code = 503;
 		req->req_step = R_STP_ERROR;
+		AZ(HSH_Deref(&wrk->stats, req->objcore, NULL));
+		req->objcore = NULL;
 		VDI_CloseFd(&bo->vbc);
 		VBO_DerefBusyObj(wrk, &req->busyobj);
 		return (REQ_FSM_MORE);
@@ -887,6 +907,7 @@ cnt_miss(struct worker *wrk, struct req *req)
 		http_SetHeader(bo->bereq, "Accept-Encoding: gzip");
 	}
 
+	VCL_fetch_method(req);
 	VCL_miss_method(req);
 
 	if (req->handling == VCL_RET_FETCH) {
@@ -951,6 +972,7 @@ cnt_pass(struct worker *wrk, struct req *req)
 	HTTP_Setup(bo->bereq, bo->ws, bo->vsl, HTTP_Bereq);
 	http_FilterReq(req, HTTPH_R_PASS);
 
+	VCL_fetch_method(req);
 	VCL_pass_method(req);
 
 	if (req->handling == VCL_RET_ERROR) {

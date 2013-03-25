@@ -97,7 +97,6 @@ EXTRA_DIST = \
 	installation/index.rst \
 	installation/install.rst \
 	installation/prerequisites.rst \
-	installation/upgrade.rst \
 	installation/platformnotes.rst \
 	phk/autocrap.rst \
 	phk/backends.rst \
@@ -111,6 +110,7 @@ EXTRA_DIST = \
 	phk/thoughts.rst \
 	phk/three-zero.rst \
 	phk/vcl_expr.rst \
+	phk/wanton_destruction.rst \
 	reference/index.rst \
 	reference/params.rst \
 	reference/varnishadm.rst \
