@@ -293,17 +293,16 @@ VRT_hashdata(struct req *req, const char *str, ...)
 /*--------------------------------------------------------------------*/
 
 double
-VRT_r_now(const struct req *req)
+VRT_r_now()
 {
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
 	return (VTIM_real());
 }
 
 /*--------------------------------------------------------------------*/
 
 char *
-VRT_IP_string(const struct req *req, const struct sockaddr_storage *sa)
+VRT_IP_string(struct ws *ws, const struct sockaddr_storage *sa)
 {
 	char *p;
 	const struct sockaddr_in *si4;
@@ -311,7 +310,7 @@ VRT_IP_string(const struct req *req, const struct sockaddr_storage *sa)
 	const void *addr;
 	int len;
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
+	CHECK_OBJ_NOTNULL(ws, WS_MAGIC);
 	switch (sa->ss_family) {
 	case AF_INET:
 		len = INET_ADDRSTRLEN;
@@ -327,65 +326,62 @@ VRT_IP_string(const struct req *req, const struct sockaddr_storage *sa)
 		INCOMPL();
 	}
 	XXXAN(len);
-	AN(p = WS_Alloc(req->http->ws, len));
+	AN(p = WS_Alloc(ws, len));
 	AN(inet_ntop(sa->ss_family, addr, p, len));
 	return (p);
 }
 
 char *
-VRT_INT_string(const struct req *req, long num)
+VRT_INT_string(struct ws *ws, long num)
 {
 	char *p;
 	int size;
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
+	CHECK_OBJ_NOTNULL(ws, WS_MAGIC);
 	size = snprintf(NULL, 0, "%ld", num) + 1;
-	AN(p = WS_Alloc(req->http->ws, size));
+	AN(p = WS_Alloc(ws, size));
 	assert(snprintf(p, size, "%ld", num) < size);
 	return (p);
 }
 
 char *
-VRT_REAL_string(const struct req *req, double num)
+VRT_REAL_string(struct ws *ws, double num)
 {
 	char *p;
 	int size;
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
+	CHECK_OBJ_NOTNULL(ws, WS_MAGIC);
 	size = snprintf(NULL, 0, "%.3f", num) + 1;
-	AN(p = WS_Alloc(req->http->ws, size));
+	AN(p = WS_Alloc(ws, size));
 	assert(snprintf(p, size, "%.3f", num) < size);
 	return (p);
 }
 
 char *
-VRT_TIME_string(const struct req *req, double t)
+VRT_TIME_string(struct ws *ws, double t)
 {
 	char *p;
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
-	p = WS_Alloc(req->http->ws, VTIM_FORMAT_SIZE);
+	CHECK_OBJ_NOTNULL(ws, WS_MAGIC);
+	p = WS_Alloc(ws, VTIM_FORMAT_SIZE);
 	if (p != NULL)
 		VTIM_format(t, p);
 	return (p);
 }
 
 const char *
-VRT_BACKEND_string(const struct req *req, const struct director *d)
+VRT_BACKEND_string(const struct director *d)
 {
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
-	if (d == NULL)
-		d = req->director;
 	if (d == NULL)
 		return (NULL);
+	CHECK_OBJ_NOTNULL(d, DIRECTOR_MAGIC);
 	return (d->vcl_name);
 }
 
 const char *
-VRT_BOOL_string(const struct req *req, unsigned val)
+VRT_BOOL_string(unsigned val)
 {
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
 	return (val ? "true" : "false");
 }
 
@@ -433,41 +429,7 @@ VRT_synth_page(const struct req *req, unsigned flags, const char *str, ...)
 /*--------------------------------------------------------------------*/
 
 void
-VRT_ban(const struct req *req, char *cmds, ...)
-{
-	char *a1, *a2, *a3;
-	va_list ap;
-	struct ban *b;
-	int good;
-
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
-	b = BAN_New();
-	va_start(ap, cmds);
-	a1 = cmds;
-	good = 0;
-	while (a1 != NULL) {
-		good = 0;
-		a2 = va_arg(ap, char *);
-		if (a2 == NULL)
-			break;
-		a3 = va_arg(ap, char *);
-		if (a3 == NULL)
-			break;
-		if (BAN_AddTest(NULL, b, a1, a2, a3))
-			break;
-		a1 = va_arg(ap, char *);
-		good = 1;
-	}
-	if (!good)
-		BAN_Free(b);		/* XXX: report error how ? */
-	else
-		(void)BAN_Insert(b);	/* XXX: report error how ? */
-}
-
-/*--------------------------------------------------------------------*/
-
-void
-VRT_ban_string(const struct req *req, const char *str)
+VRT_ban_string(const char *str)
 {
 	char *a1, *a2, *a3;
 	char **av;
@@ -475,7 +437,6 @@ VRT_ban_string(const struct req *req, const char *str)
 	int good;
 	int i;
 
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
 	av = VAV_Parse(str, NULL, ARGV_NOESC);
 	if (av[0] != NULL) {
 		/* XXX: report error how ? */
@@ -530,7 +491,7 @@ VRT_purge(struct req *req, double ttl, double grace)
 {
 
 	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
-	if (req->cur_method == VCL_MET_HIT)
+	if (req->cur_method == VCL_MET_LOOKUP)
 		HSH_Purge(req, req->obj->objcore->objhead, ttl, grace);
 	else if (req->cur_method == VCL_MET_MISS)
 		HSH_Purge(req, req->objcore->objhead, ttl, grace);

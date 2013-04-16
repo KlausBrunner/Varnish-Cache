@@ -910,7 +910,7 @@ extern volatile struct params * cache_param;
 void THR_SetName(const char *name);
 const char* THR_GetName(void);
 void THR_SetRequest(const struct req *);
-const struct req * THR_GetRequest(void);
+struct req * THR_GetRequest(void);
 
 /* cache_lck.c */
 
@@ -1016,7 +1016,8 @@ void VCL_Rel(struct VCL_conf **vcc);
 void VCL_Poll(void);
 const char *VCL_Return_Name(unsigned method);
 
-#define VCL_MET_MAC(l,u,b) void VCL_##l##_method(struct req *);
+#define VCL_MET_MAC(l,u,b) \
+    void VCL_##l##_method(struct worker *, struct req *, struct ws *);
 #include "tbl/vcl_returns.h"
 #undef VCL_MET_MAC
 

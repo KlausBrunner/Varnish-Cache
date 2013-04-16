@@ -93,13 +93,28 @@ sub vcl_hash {
     return (hash);
 }
 
-sub vcl_hit {
+sub vcl_lookup {
+/*
+    if (!obj) {
+	    return (deliver);
+    }
+    if (obj.uncacheable) {
+	return (pass);
+    }
+    if (obj.ttl >= 0s) {
+	return (deliver);
+    }
+    if (obj.ttl + obj.grace > 0s) {
+	return (deliver_stale);
+    }
+*/
     return (deliver);
 }
 
 sub vcl_miss {
     return (fetch);
 }
+
 
 sub vcl_fetch {
     return (fetch);

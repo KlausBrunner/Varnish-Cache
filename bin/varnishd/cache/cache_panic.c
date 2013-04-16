@@ -388,7 +388,7 @@ pan_ic(const char *func, const char *file, int line, const char *cond,
     int err, enum vas_e kind)
 {
 	const char *q;
-	const struct req *req;
+	struct req *req;
 
 	AZ(pthread_mutex_lock(&panicstr_mtx)); /* Won't be released,
 						  we're going to die
@@ -435,8 +435,10 @@ pan_ic(const char *func, const char *file, int line, const char *cond,
 
 	if (!FEATURE(FEATURE_SHORT_PANIC)) {
 		req = THR_GetRequest();
-		if (req != NULL)
+		if (req != NULL) {
 			pan_req(req);
+			VSL_Flush(req->vsl, 0);
+		}
 	}
 	VSB_printf(pan_vsp, "\n");
 	VSB_bcat(pan_vsp, "", 1);	/* NUL termination */

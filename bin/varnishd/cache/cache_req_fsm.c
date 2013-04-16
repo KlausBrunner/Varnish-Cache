@@ -158,7 +158,7 @@ cnt_prepresp(struct worker *wrk, struct req *req)
 	HTTP_Setup(req->resp, req->ws, req->vsl, HTTP_Resp);
 	RES_BuildHttp(req);
 
-	VCL_deliver_method(req);
+	VCL_deliver_method(wrk, req, req->http->ws);
 	switch (req->handling) {
 	case VCL_RET_DELIVER:
 		break;
@@ -308,7 +308,7 @@ cnt_error(struct worker *wrk, struct req *req)
 		http_PutResponse(h, req->err_reason);
 	else
 		http_PutResponse(h, http_StatusMessage(req->err_code));
-	VCL_error_method(req);
+	VCL_error_method(wrk, req, req->http->ws);
 
 	if (req->handling == VCL_RET_RESTART &&
 	    req->restarts <  cache_param->max_restarts) {
@@ -416,7 +416,7 @@ cnt_fetch(struct worker *wrk, struct req *req)
 		AZ(bo->do_esi);
 		AZ(bo->do_pass);
 
-		VCL_response_method(req);
+		VCL_response_method(wrk, req, req->http->ws);
 
 		if (bo->do_pass)
 			req->objcore->flags |= OC_F_PASS;
@@ -713,65 +713,6 @@ cnt_fetchbody(struct worker *wrk, struct req *req)
 	return (REQ_FSM_MORE);
 }
 
-/*--------------------------------------------------------------------
- * HIT
- * We had a cache hit.  Ask VCL, then march off as instructed.
- *
-DOT subgraph xcluster_hit {
-DOT	hit [
-DOT		shape=record
-DOT		label="{cnt_hit:|{vcl_hit()|{req.|obj.}}|{<err>error?|<rst>restart?}|{<del>deliver?|<pass>pass?}}"
-DOT	]
-DOT }
-XDOT hit:err -> err_hit [label="error"]
-XDOT err_hit [label="ERROR",shape=plaintext]
-XDOT hit:rst -> rst_hit [label="restart",color=purple]
-XDOT rst_hit [label="RESTART",shape=plaintext]
-DOT hit:pass -> pass [label=pass,style=bold,color=red]
-DOT hit:del -> prepresp [label="deliver",style=bold,color=green]
- */
-
-static enum req_fsm_nxt
-cnt_hit(struct worker *wrk, struct req *req)
-{
-	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
-	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
-
-	CHECK_OBJ_NOTNULL(req->obj, OBJECT_MAGIC);
-	CHECK_OBJ_NOTNULL(req->vcl, VCL_CONF_MAGIC);
-	AZ(req->objcore);
-	AZ(req->busyobj);
-
-	assert(!(req->obj->objcore->flags & OC_F_PASS));
-
-	VCL_hit_method(req);
-
-	if (req->handling == VCL_RET_DELIVER) {
-		//AZ(req->busyobj->bereq->ws);
-		//AZ(req->busyobj->beresp->ws);
-		(void)HTTP1_DiscardReqBody(req);	// XXX: handle err
-		req->req_step = R_STP_PREPRESP;
-		return (REQ_FSM_MORE);
-	}
-
-	/* Drop our object, we won't need it */
-	(void)HSH_Deref(&wrk->stats, NULL, &req->obj);
-	req->objcore = NULL;
-
-	switch(req->handling) {
-	case VCL_RET_PASS:
-		req->req_step = R_STP_PASS;
-		return (REQ_FSM_MORE);
-	case VCL_RET_ERROR:
-		req->req_step = R_STP_ERROR;
-		return (REQ_FSM_MORE);
-	case VCL_RET_RESTART:
-		req->req_step = R_STP_RESTART;
-		return (REQ_FSM_MORE);
-	default:
-		WRONG("Illegal action in vcl_hit{}");
-	}
-}
 
 /*--------------------------------------------------------------------
  * LOOKUP
@@ -795,10 +736,11 @@ DOT lookup:yes -> pass [style=bold,color=red]
 static enum req_fsm_nxt
 cnt_lookup(struct worker *wrk, struct req *req)
 {
-	struct objcore *oc;
+	struct objcore *oc, *boc;
 	struct object *o;
 	struct objhead *oh;
 	struct busyobj *bo;
+	enum lookup_e lr;
 
 	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
 	CHECK_OBJ_NOTNULL(req, REQ_MAGIC);
@@ -810,8 +752,11 @@ cnt_lookup(struct worker *wrk, struct req *req)
 	VRY_Prep(req);
 
 	AZ(req->objcore);
-	oc = HSH_Lookup(req);
-	if (oc == NULL) {
+	lr = HSH_Lookup(req, &oc, &boc,
+	    req->esi_level == 0 ? 1 : 0,
+	    req->hash_always_miss ? 1 : 0
+	);
+	if (lr == HSH_BUSY) {
 		/*
 		 * We lost the session to a busy object, disembark the
 		 * worker thread.   We return to STP_LOOKUP when the busy
@@ -821,6 +766,45 @@ cnt_lookup(struct worker *wrk, struct req *req)
 		return (REQ_FSM_DISEMBARK);
 	}
 	AZ(req->objcore);
+
+
+	switch (lr) {
+	case HSH_EXP:
+VSLb(req->vsl, SLT_Debug, "XXXX EXP\n");
+		AN(oc);
+		AZ(boc);
+		break;
+	case HSH_EXPBUSY:
+VSLb(req->vsl, SLT_Debug, "XXXX EXPBUSY\n");
+		AN(oc);
+		AN(boc);
+		if (VDI_Healthy(req->director, req)) {
+VSLb(req->vsl, SLT_Debug, "deref oc\n");
+			(void)HSH_Deref(&wrk->stats, oc, NULL);
+			oc = boc;
+			boc = NULL;
+		} else {
+VSLb(req->vsl, SLT_Debug, "drop boc\n");
+			(void)HSH_Deref(&wrk->stats, boc, NULL);
+			boc = NULL;
+		}
+		break;
+	case HSH_MISS:
+VSLb(req->vsl, SLT_Debug, "XXXX MISS\n");
+		AZ(oc);
+		AN(boc);
+		oc = boc;
+		boc = NULL;
+		AN(oc->flags & OC_F_BUSY);
+		break;
+	case HSH_HIT:
+VSLb(req->vsl, SLT_Debug, "XXXX HIT\n");
+		AN(oc);
+		AZ(boc);
+		break;
+	default:
+		INCOMPL();
+	}
 
 	CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
 	oh = oc->objhead;
@@ -852,18 +836,50 @@ cnt_lookup(struct worker *wrk, struct req *req)
 
 	VRY_Finish(req, NULL);
 
-	if (oc->flags & OC_F_PASS) {
+	if (oc->flags & OC_F_PASS)
 		wrk->stats.cache_hitpass++;
-		VSLb(req->vsl, SLT_HitPass, "%u", req->obj->vxid);
-		(void)HSH_Deref(&wrk->stats, NULL, &req->obj);
-		AZ(req->objcore);
-		req->req_step = R_STP_PASS;
+	else
+		wrk->stats.cache_hit++;
+	VSLb(req->vsl, SLT_Hit, "%u", req->obj->vxid);
+
+	AZ(req->objcore);
+	AZ(req->busyobj);
+
+	VCL_lookup_method(wrk, req, req->http->ws);
+
+	if ((req->obj->objcore->flags & OC_F_PASS) &&
+	    req->handling == VCL_RET_DELIVER) {
+		VSLb(req->vsl, SLT_VCL_Error,
+		    "obj.uncacheable set, but vcl_lookup{} returned 'deliver'"
+		    ", changing to 'pass'");
+		req->handling = VCL_RET_PASS;
+	}
+
+	if (req->handling == VCL_RET_DELIVER) {
+		//AZ(req->busyobj->bereq->ws);
+		//AZ(req->busyobj->beresp->ws);
+		(void)HTTP1_DiscardReqBody(req);	// XXX: handle err
+		req->req_step = R_STP_PREPRESP;
 		return (REQ_FSM_MORE);
 	}
 
-	wrk->stats.cache_hit++;
-	VSLb(req->vsl, SLT_Hit, "%u", req->obj->vxid);
-	req->req_step = R_STP_HIT;
+	/* Drop our object, we won't need it */
+	(void)HSH_Deref(&wrk->stats, NULL, &req->obj);
+	req->objcore = NULL;
+
+	switch(req->handling) {
+	case VCL_RET_PASS:
+		req->req_step = R_STP_PASS;
+		break;
+	case VCL_RET_ERROR:
+		req->req_step = R_STP_ERROR;
+		break;
+	case VCL_RET_RESTART:
+		req->req_step = R_STP_RESTART;
+		break;
+	default:
+		WRONG("Illegal action in vcl_lookup{}");
+	}
 	return (REQ_FSM_MORE);
 }
 
@@ -907,8 +923,8 @@ cnt_miss(struct worker *wrk, struct req *req)
 		http_SetHeader(bo->bereq, "Accept-Encoding: gzip");
 	}
 
-	VCL_fetch_method(req);
-	VCL_miss_method(req);
+	VCL_fetch_method(wrk, req, req->http->ws);
+	VCL_miss_method(wrk, req, req->http->ws);
 
 	if (req->handling == VCL_RET_FETCH) {
 		CHECK_OBJ_NOTNULL(bo, BUSYOBJ_MAGIC);
@@ -972,8 +988,8 @@ cnt_pass(struct worker *wrk, struct req *req)
 	HTTP_Setup(bo->bereq, bo->ws, bo->vsl, HTTP_Bereq);
 	http_FilterReq(req, HTTPH_R_PASS);
 
-	VCL_fetch_method(req);
-	VCL_pass_method(req);
+	VCL_fetch_method(wrk, req, req->http->ws);
+	VCL_pass_method(wrk, req, req->http->ws);
 
 	if (req->handling == VCL_RET_ERROR) {
 		http_Teardown(bo->bereq);
@@ -1031,7 +1047,7 @@ cnt_pipe(struct worker *wrk, struct req *req)
 	HTTP_Setup(bo->bereq, bo->ws, bo->vsl, HTTP_Bereq);
 	http_FilterReq(req, 0);
 
-	VCL_pipe_method(req);
+	VCL_pipe_method(wrk, req, req->http->ws);
 
 	if (req->handling == VCL_RET_ERROR)
 		INCOMPL();
@@ -1103,7 +1119,7 @@ DOT hash -> lookup [label="hash",style=bold,color=green]
  */
 
 static enum req_fsm_nxt
-cnt_recv(const struct worker *wrk, struct req *req)
+cnt_recv(struct worker *wrk, struct req *req)
 {
 	unsigned recv_handling;
 	struct SHA256Context sha256ctx;
@@ -1137,7 +1153,7 @@ cnt_recv(const struct worker *wrk, struct req *req)
 
 	http_CollectHdr(req->http, H_Cache_Control);
 
-	VCL_recv_method(req);
+	VCL_recv_method(wrk, req, req->http->ws);
 	recv_handling = req->handling;
 
 	if (cache_param->http_gzip_support &&
@@ -1153,7 +1169,7 @@ cnt_recv(const struct worker *wrk, struct req *req)
 
 	req->sha256ctx = &sha256ctx;	/* so HSH_AddString() can find it */
 	SHA256_Init(req->sha256ctx);
-	VCL_hash_method(req);
+	VCL_hash_method(wrk, req, req->http->ws);
 	assert(req->handling == VCL_RET_HASH);
 	SHA256_Final(req->digest, req->sha256ctx);
 	req->sha256ctx = NULL;
