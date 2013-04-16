@@ -559,29 +559,26 @@ collect_client(struct logline *lp, enum VSL_tag_e tag, unsigned spec,
 
 	case SLT_ReqEnd:
 	{
-		char ttfb[64];
+		char ttfb[64], tt[64];
+		double begint, endt;		
 		if (!lp->active)
 			break;
 		if (lp->df_ttfb != NULL ||
-		    sscanf(ptr, "%*u %*u.%*u %ld.%*u %*u.%*u %s", &l, ttfb)
-		    != 2) {
+		    sscanf(ptr, "%lf %lf %*u.%*u %s", &endt, &begint, ttfb)
+		    != 3) {
 			clean_logline(lp);
 			break;
 		}
-
-		double begint, endt;
-		if(sscanf(ptr, "%*u %lf %lf %*u.%*u %*s", &begint, &endt) == 2) {
-			char tt[64];
-			sprintf(tt, "%.9f", endt - begint);
-			if (lp->df_tt != NULL)
-				free(lp->df_tt);
-			lp->df_tt = strdup(tt);	
-		}
+		
+		sprintf(tt, "%.9f", endt - begint);
+		if (lp->df_tt != NULL)
+			free(lp->df_tt);
+		lp->df_tt = strdup(tt);	
 
 		if (lp->df_ttfb != NULL)
 			free(lp->df_ttfb);
 		lp->df_ttfb = strdup(ttfb);
-		t = l;
+		t = (long)endt;
 		localtime_r(&t, &lp->df_t);
 		/* got it all */
 		lp->complete = 1;

@@ -55,6 +55,9 @@ The following options are available:
    	         In CLF format, i.e. a '-' rather than a 0 when no
    	         bytes are sent.
 
+	      %D 
+	         Entire time taken to serve request, in seconds.
+
 	      %H 
 	         The request protocol. Defaults to HTTP/1.0 if not
                  known.
